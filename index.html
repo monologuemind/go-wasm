@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8"/>
+        <script src="wasm_exec.js"></script>
+        <script src="htmx.js"></script>
+        <script defer>
+          function try_parse(str) {
+            try {
+              return JSON.parse(str);
+            } catch (e) {
+              return {}
+            }
+          }
+          
+          let paths = [];
+          window.resolvers = new Map(); // Stores pending Promise resolvers
+          
+          function handle_path_response(...args) {
+            //console.log("handle_path_response", get_string(...args));
+            const response = window.get_string(...args);
+            const data = try_parse(response);
+          
+            console.log("handle_path_response", data, window.resolvers);
+          
+            if (window.resolvers.has(data.id)) {
+              console.log("resolving");
+              window.resolvers.get(data.id)(data.text); // Resolve the correct Promise
+              window.resolvers.delete(data.id); // Clean up the Map
+            }
+          
+            return
+          }
+          
+          function handle_send_paths(...args) {
+            //console.log("handle_send_paths", get_string(...args));
+            const path_string = window.get_string(...args);
+            paths = path_string.split(",");
+          }
+          
+          
+          const go = new Go();
+          go.importObject.env = {
+            ...go.importObject.env,
+            convert_string(...args) {
+              console.log(args);
+              console.log(get_string(...args));
+            },
+            handle_path_response,
+            handle_send_paths,
+          }
+          
+          WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject).then((result) => {
+            window.get_string = (addr, length) => {
+              const memory = result.instance.exports.memory;
+              const extractedBuffer = new Uint8Array(memory.buffer, addr, length);
+              const str = new TextDecoder("utf8").decode(extractedBuffer);
+              return str
+            };
+          
+            window.send_string = (message, func_name) => {
+              if (!result.instance.exports[func_name]) {
+                console.error(`Function name not available on wasm exports: ${func_name}`);
+                return;
+              }
+          
+              const message_str = JSON.stringify(message);
+          
+              const encoder = new TextEncoder();
+              const encodedMessage = encoder.encode(message_str);
+              const wasm_malloc = result.instance.exports.malloc; // You need a malloc function in Go
+              const ptr = wasm_malloc(encodedMessage.length);
+              // Copy data into WASM memory
+              const wasmMemoryView = new Uint8Array(result.instance.exports.memory.buffer, ptr, encodedMessage.length);
+              wasmMemoryView.set(encodedMessage);
+              result.instance.exports[func_name](ptr, encodedMessage.length);
+              result.instance.exports.free(ptr);
+            };
+          
+            go.run(result.instance);
+            //console.log(result);
+          
+            htmx.defineExtension('wasm', {
+              onEvent: function(name, evt) {
+                const path = evt?.detail?.elt?.['htmx-internal-data']?.path;
+                const params = evt.detail?.requestConfig?.parameters;
+                if (name === "htmx:beforeSend" && paths.includes(path)) {
+                  console.log(path, params);
+          
+                  evt.detail.xhr.serverless = {
+                    'params': params,
+                    'path': path
+                  };
+                  evt.detail.xhr.send = () => {
+                    evt.detail.xhr.dispatchEvent(new Event('loadstart'));
+                    evt.detail.xhr.dispatchEvent(new Event('load'));
+                    evt.detail.xhr.dispatchEvent(new Event('loadend'));
+                    evt.detail.xhr.readyState == XMLHttpRequest.DONE
+                  };
+                  evt.detail.shouldSwap = true;
+                }
+              },
+              async transformResponse(text, xhr, elt) {
+                const path = xhr?.serverless?.path || '';
+                const params = xhr.serverless?.params;
+          
+                if (paths.includes(path)) {
+                  console.log({ text, xhr, elt, path, params });
+          
+                  const response_text = await new Promise((resolve) => {
+                    const id = crypto.randomUUID();
+                    window.resolvers.set(id, (...args) => {
+                      console.log(args);
+                      resolve(...args);
+                    }); // Store the resolver
+                    window.send_string({ path, id }, "send_path_message");
+                  });
+                  console.log("response_text", response_text);
+          
+                  return response_text || "you don't want to see this";
+                }
+                return text;
+              }
+            })
+          });
+        </script>
+        <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+    </head>
+
+    <body>
+      <input x-init="console.log($el)" type="text" @change="console.log($el)" value="yo"></input>
+      <button x-init="console.log($el)" x-on:click="console.log($el)">huh</button>
+      <div x-data="{ count: 0 }">
+          <button x-on:click="count++">Increment</button>
+       
+          <span x-text="count"></span>
+      </div>
+
+      <button hx-on:disabled="alert('yo')" hx-get="/wasm/button" hx-swap="outerHTML" hx-ext="wasm" hx-target="#me">
+        Click Me
+      </button>
+      <button id="me">
+        REPLACE ME
+      </button>
+    </body>
+</html>
