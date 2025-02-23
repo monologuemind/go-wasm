@@ -64,8 +64,17 @@ func send_path_message(ptr *byte, length int) {
 func process_message(message Message) {
 	fmt.Println("parsing: ", message.Path)
 	var b bytes.Buffer
-	Test().Render(context.Background(), &b)
-	str := b.String()
+	var str string
+
+	if message.Path == "/wasm/button" {
+		Test().Render(context.Background(), &b)
+		str = b.String()
+	}
+
+	if message.Path == "/wasm/option" {
+		Select().Render(context.Background(), &b)
+		str = b.String()
+	}
 
 	path_response := PathResponse{
 		ID:   message.ID,
